@@ -58,31 +58,64 @@ public class MainActivity extends Activity {
         statusText = new TextView(this);
         statusText.setPadding(40, 40, 40, 40);
         statusText.setTextSize(18);
+        statusText.setTextColor(0xFFE8E8F0);
+        statusText.setBackgroundColor(0xFF0A0A0F);
+        statusText.setText("BT Audio Controller\nStarting...");
         setContentView(statusText);
         
-        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
-        if (bluetoothAdapter == null) {
-            statusText.setText("Bluetooth not supported on this device");
-            return;
+        try {
+            bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+            if (bluetoothAdapter == null) {
+                statusText.setText("Bluetooth not supported on this device");
+                return;
+            }
+            
+            statusText.setText("BT Audio Controller\nInitializing Bluetooth...");
+            
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.BLUETOOTH,
+                    Manifest.permission.BLUETOOTH_ADMIN,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                }, 1);
+            }
+            
+            try {
+                bluetoothAdapter.getProfileProxy(this, a2dpListener, BluetoothProfile.A2DP);
+            } catch (Exception e) {
+                statusText.setText("Error: " + e.getMessage());
+            }
+            
+            if (!bluetoothAdapter.isEnabled()) {
+                try {
+                    bluetoothAdapter.enable();
+                    statusText.setText("Enabling Bluetooth...\nPlease wait...");
+                } catch (Exception e) {
+                    statusText.setText("Failed to enable Bluetooth: " + e.getMessage());
+                }
+            }
+            
+            // Start server in background
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Thread.sleep(1000); // Give Bluetooth time to initialize
+                        startHttpServer();
+                    } catch (Exception e) {
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                statusText.setText("Server error: " + e.getMessage());
+                            }
+                        });
+                    }
+                }
+            }).start();
+        } catch (Exception e) {
+            statusText.setText("Fatal error: " + e.getMessage());
         }
-        
-        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH,
-                Manifest.permission.BLUETOOTH_ADMIN,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            }, 1);
-        }
-        
-        bluetoothAdapter.getProfileProxy(this, a2dpListener, BluetoothProfile.A2DP);
-        
-        if (!bluetoothAdapter.isEnabled()) {
-            bluetoothAdapter.enable();
-            statusText.setText("Enabling Bluetooth...");
-        }
-        
-        startHttpServer();
     }
     
     private void startHttpServer() {
