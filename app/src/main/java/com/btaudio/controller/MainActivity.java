@@ -58,64 +58,117 @@ public class MainActivity extends Activity {
         statusText = new TextView(this);
         statusText.setPadding(40, 40, 40, 40);
         statusText.setTextSize(18);
-        statusText.setTextColor(0xFFE8E8F0);
-        statusText.setBackgroundColor(0xFF0A0A0F);
+        statusText.setTextColor(0xFFFFFFFF);
+        statusText.setBackgroundColor(0xFF000000);
         statusText.setText("BT Audio Controller\nStarting...");
         setContentView(statusText);
+        
+        // Set text immediately to verify view is working
+        try {
+            Thread.sleep(100);
+        } catch (InterruptedException e) {}
+        
+        updateStatus("Initializing...");
         
         try {
             bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
             if (bluetoothAdapter == null) {
-                statusText.setText("Bluetooth not supported on this device");
+                updateStatus("Bluetooth NOT supported");
                 return;
             }
             
-            statusText.setText("BT Audio Controller\nInitializing Bluetooth...");
+            updateStatus("Bluetooth found");
             
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            // Check and request permissions
+            boolean hasPermission = checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+            updateStatus(hasPermission ? "Permissions OK" : "Requesting permissions...");
+            
+            if (!hasPermission) {
                 requestPermissions(new String[]{
                     Manifest.permission.BLUETOOTH_CONNECT,
                     Manifest.permission.BLUETOOTH,
                     Manifest.permission.BLUETOOTH_ADMIN,
                     Manifest.permission.ACCESS_FINE_LOCATION
                 }, 1);
+                // Wait for callback - don't continue until permissions granted
+                return;
+            }
+            
+            setupBluetooth();
+            
+        } catch (Exception e) {
+            updateStatus("Fatal error: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+        }
+    }
+    
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 1) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            updateStatus("Permissions " + (granted ? "granted" : "denied"));
+            if (granted) {
+                setupBluetooth();
+            }
+        }
+    }
+    
+    private void setupBluetooth() {
+        try {
+            updateStatus("Setting up Bluetooth...");
+            
+            if (!bluetoothAdapter.isEnabled()) {
+                try {
+                    bluetoothAdapter.enable();
+                    updateStatus("Enabling Bluetooth...");
+                } catch (Exception e) {
+                    updateStatus("Cannot enable: " + e.getMessage());
+                    return;
+                }
             }
             
             try {
                 bluetoothAdapter.getProfileProxy(this, a2dpListener, BluetoothProfile.A2DP);
             } catch (Exception e) {
-                statusText.setText("Error: " + e.getMessage());
+                updateStatus("A2DP error: " + e.getMessage());
             }
             
-            if (!bluetoothAdapter.isEnabled()) {
-                try {
-                    bluetoothAdapter.enable();
-                    statusText.setText("Enabling Bluetooth...\nPlease wait...");
-                } catch (Exception e) {
-                    statusText.setText("Failed to enable Bluetooth: " + e.getMessage());
-                }
-            }
+            updateStatus("Starting web server...");
             
-            // Start server in background
+            // Start HTTP server
             new Thread(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        Thread.sleep(1000); // Give Bluetooth time to initialize
+                        Thread.sleep(2000); // Wait for Bluetooth to initialize
                         startHttpServer();
                     } catch (Exception e) {
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                statusText.setText("Server error: " + e.getMessage());
-                            }
-                        });
+                        updateStatusAsync("Server error: " + e.getClass().getSimpleName() + " - " + e.getMessage());
                     }
                 }
             }).start();
         } catch (Exception e) {
-            statusText.setText("Fatal error: " + e.getMessage());
+            updateStatus("Setup error: " + e.getClass().getSimpleName() + " - " + e.getMessage());
         }
+    }
+    
+    private void updateStatus(final String text) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                statusText.append("\n" + text);
+            }
+        });
+        try { Thread.sleep(100); } catch (InterruptedException e) {}
+    }
+    
+    private void updateStatusAsync(final String text) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                statusText.append("\n" + text);
+            }
+        });
     }
     
     private void startHttpServer() {
