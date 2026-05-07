@@ -244,7 +244,12 @@ public class MainActivity extends Activity {
             while (running) {
                 try {
                     Socket client = serverSocket.accept();
-                    executor.execute(() -> handleRequest(client));
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            handleRequest(client);
+                        }
+                    });
                 } catch (IOException e) {
                     if (running) e.printStackTrace();
                 }
