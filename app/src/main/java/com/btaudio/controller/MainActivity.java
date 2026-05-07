@@ -5,6 +5,10 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothA2dp;
 import android.bluetooth.BluetoothProfile;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -23,6 +27,8 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -35,6 +41,8 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newCachedThreadPool();
+    private boolean isScanning = false;
+    private final List<BluetoothDevice> discoveredDevices = new ArrayList<>();
     
     private BluetoothProfile.ServiceListener a2dpListener = new BluetoothProfile.ServiceListener() {
         @Override
@@ -50,10 +58,41 @@ public class MainActivity extends Activity {
             }
         }
     };
+    
+    private final BroadcastReceiver discoveryReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (BluetoothDevice.ACTION_FOUND.equals(action)) {
+                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (device != null && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                    synchronized (discoveredDevices) {
+                        boolean exists = false;
+                        for (BluetoothDevice d : discoveredDevices) {
+                            if (d.getAddress().equals(device.getAddress())) {
+                                exists = true;
+                                break;
+                            }
+                        }
+                        if (!exists) {
+                            discoveredDevices.add(device);
+                        }
+                    }
+                }
+            } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
+                isScanning = false;
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(BluetoothDevice.ACTION_FOUND);
+        filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
+        registerReceiver(discoveryReceiver, filter);
         
         statusText = new TextView(this);
         statusText.setPadding(40, 40, 40, 40);
@@ -62,11 +101,6 @@ public class MainActivity extends Activity {
         statusText.setBackgroundColor(0xFF000000);
         statusText.setText("BT Audio Controller\nStarting...");
         setContentView(statusText);
-        
-        // Set text immediately to verify view is working
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {}
         
         updateStatus("Initializing...");
         
@@ -79,7 +113,6 @@ public class MainActivity extends Activity {
             
             updateStatus("Bluetooth found");
             
-            // Check and request permissions
             boolean hasPermission = checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
             updateStatus(hasPermission ? "Permissions OK" : "Requesting permissions...");
             
@@ -88,9 +121,9 @@ public class MainActivity extends Activity {
                     Manifest.permission.BLUETOOTH_CONNECT,
                     Manifest.permission.BLUETOOTH,
                     Manifest.permission.BLUETOOTH_ADMIN,
-                    Manifest.permission.ACCESS_FINE_LOCATION
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.BLUETOOTH_SCAN
                 }, 1);
-                // Wait for callback - don't continue until permissions granted
                 return;
             }
             
@@ -135,12 +168,11 @@ public class MainActivity extends Activity {
             
             updateStatus("Starting web server...");
             
-            // Start HTTP server
             new Thread(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        Thread.sleep(2000); // Wait for Bluetooth to initialize
+                        Thread.sleep(2000);
                         startHttpServer();
                     } catch (Exception e) {
                         updateStatusAsync("Server error: " + e.getClass().getSimpleName() + " - " + e.getMessage());
@@ -169,6 +201,55 @@ public class MainActivity extends Activity {
                 statusText.append("\n" + text);
             }
         });
+    }
+    
+    private void startScanning() {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    return;
+                }
+                synchronized (discoveredDevices) {
+                    discoveredDevices.clear();
+                }
+                
+                Set<BluetoothDevice> paired = bluetoothAdapter.getBondedDevices();
+                synchronized (discoveredDevices) {
+                    discoveredDevices.addAll(paired);
+                }
+                
+                if (bluetoothAdapter.isDiscovering()) {
+                    bluetoothAdapter.cancelDiscovery();
+                }
+                
+                isScanning = true;
+                bluetoothAdapter.startDiscovery();
+                
+                try {
+                    Thread.sleep(10000);
+                } catch (InterruptedException e) {}
+                
+                if (bluetoothAdapter.isDiscovering()) {
+                    bluetoothAdapter.cancelDiscovery();
+                }
+                isScanning = false;
+            }
+        });
+    }
+    
+    private boolean startPairing(String mac) {
+        try {
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+            BluetoothDevice device = bluetoothAdapter.getRemoteDevice(mac);
+            java.lang.reflect.Method createBond = device.getClass().getMethod("createBond");
+            Boolean result = (Boolean) createBond.invoke(device);
+            return result != null && result;
+        } catch (Exception e) {
+            return false;
+        }
     }
     
     private void startHttpServer() {
@@ -273,7 +354,6 @@ public class MainActivity extends Activity {
                 String method = parts[0];
                 String path = parts[1];
                 
-                // Read headers
                 String contentType = "text/html";
                 String line;
                 while ((line = reader.readLine()) != null && !line.isEmpty()) {}
@@ -284,6 +364,13 @@ public class MainActivity extends Activity {
                     contentType = "text/html";
                 } else if ("GET".equals(method) && "/api/devices".equals(path)) {
                     response = getDevicesJson();
+                    contentType = "application/json";
+                } else if ("POST".equals(method) && path.startsWith("/api/scan")) {
+                    startScanning();
+                    response = "{\"ok\":true,\"message\":\"Scanning for 10 seconds...\"}";
+                    contentType = "application/json";
+                } else if ("POST".equals(method) && path.startsWith("/api/pair")) {
+                    response = pairDevice(path);
                     contentType = "application/json";
                 } else if ("POST".equals(method) && path.startsWith("/api/connect")) {
                     response = connectDevice(path);
@@ -343,9 +430,58 @@ public class MainActivity extends Activity {
                     devices.put(obj);
                 }
                 
+                synchronized (discoveredDevices) {
+                    for (BluetoothDevice device : discoveredDevices) {
+                        boolean alreadyPaired = false;
+                        for (BluetoothDevice p : paired) {
+                            if (p.getAddress().equals(device.getAddress())) {
+                                alreadyPaired = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyPaired) {
+                            JSONObject obj = new JSONObject();
+                            obj.put("name", device.getName() != null ? device.getName() : "Unknown");
+                            obj.put("mac", device.getAddress());
+                            obj.put("paired", false);
+                            obj.put("connected", false);
+                            obj.put("a2dp_state", -1);
+                            devices.put(obj);
+                        }
+                    }
+                }
+                
                 return devices.toString(2);
             } catch (Exception e) {
                 return "{\"error\":\"" + e.getMessage() + "\",\"devices\":[]}";
+            }
+        }
+        
+        private String pairDevice(String path) {
+            try {
+                String mac = "";
+                if (path.contains("?")) {
+                    String query = path.split("\\?")[1];
+                    String[] params = query.split("&");
+                    for (String param : params) {
+                        if (param.startsWith("mac=")) {
+                            mac = param.substring(4);
+                        }
+                    }
+                }
+                
+                if (mac.isEmpty()) {
+                    return "{\"ok\":false,\"message\":\"No MAC provided\"}";
+                }
+                
+                boolean result = startPairing(mac);
+                if (result) {
+                    return "{\"ok\":true,\"message\":\"Pairing started for " + mac + ". Please accept on the device.\"}";
+                } else {
+                    return "{\"ok\":false,\"message\":\"Pairing failed for " + mac + "\"}";
+                }
+            } catch (Exception e) {
+                return "{\"ok\":false,\"message\":\"Error: " + e.getMessage() + "\"}";
             }
         }
         
@@ -383,20 +519,11 @@ public class MainActivity extends Activity {
                         connectMethod.invoke(bluetoothA2dp, device);
                         return "{\"ok\":true,\"message\":\"Connecting to " + device.getName() + " (A2DP)\"}";
                     } catch (Exception e) {
-                        // Try RFCOMM as fallback
+                        return "{\"ok\":false,\"message\":\"A2DP connect failed: " + e.getMessage() + "\"}";
                     }
                 }
                 
-                try {
-                    UUID uuid = UUID.fromString("0000110D-0000-1000-8000-00805F9B34FB");
-                    android.bluetooth.BluetoothSocket socket = device.createRfcommSocketToServiceRecord(uuid);
-                    socket.connect();
-                    socket.close();
-                    return "{\"ok\":true,\"message\":\"Connected to " + device.getName() + "\"}";
-                } catch (Exception e) {
-                    return "{\"ok\":false,\"message\":\"Connection failed: " + e.getMessage() + "\"}";
-                }
-                
+                return "{\"ok\":false,\"message\":\"A2DP not available\"}";
             } catch (Exception e) {
                 return "{\"ok\":false,\"message\":\"Error: " + e.getMessage() + "\"}";
             }
@@ -445,31 +572,39 @@ public class MainActivity extends Activity {
             sb.append(".btn{display:inline-flex;align-items:center;justify-content:center;padding:12px 20px;border:none;border-radius:12px;font-size:.9rem;font-weight:600;cursor:pointer;width:100%}");
             sb.append(".btn:active{transform:scale(.97)}.btn-primary{background:#6c63ff;color:#fff}");
             sb.append(".btn-green{background:rgba(0,230,118,.15);color:#00e676}.btn-red{background:rgba(255,82,82,.15);color:#ff5252}");
+            sb.append(".btn-yellow{background:rgba(255,215,64,.15);color:#ffd740}");
             sb.append(".btn-sm{padding:8px 12px;font-size:.8rem;width:auto}");
-            sb.append(".device-list{max-height:40vh;overflow-y:auto}");
+            sb.append(".device-list{max-height:60vh;overflow-y:auto}");
             sb.append(".device-item{display:flex;align-items:center;gap:12px;padding:14px;background:#1e1e2a;border-radius:12px;margin-bottom:8px}");
             sb.append(".device-icon{width:42px;height:42px;border-radius:10px;background:rgba(108,99,255,.15);display:flex;align-items:center;justify-content:center;font-size:1.3rem;flex-shrink:0}");
             sb.append(".device-info{flex:1;min-width:0}.device-name{font-weight:600;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}");
             sb.append(".device-mac{font-size:.75rem;color:#8888a0;font-family:monospace}");
             sb.append(".badge{font-size:.65rem;padding:2px 6px;border-radius:6px;font-weight:600;text-transform:uppercase}");
-            sb.append(".badge-connected{background:rgba(0,230,118,.2);color:#00e676}.badge-paired{background:rgba(255,215,64,.2);color:#ffd740}");
+            sb.append(".badge-connected{background:rgba(0,230,118,.2);color:#00e676}.badge-paired{background:rgba(255,215,64,.2);color:#ffd740}.badge-found{background:rgba(108,99,255,.2);color:#a78bfa}");
             sb.append(".device-actions{display:flex;flex-direction:column;gap:6px}");
             sb.append(".toast{position:fixed;bottom:20px;left:16px;right:16px;padding:14px 18px;border-radius:12px;font-size:.85rem;font-weight:500;z-index:100;transform:translateY(100px);opacity:0;transition:all .3s;text-align:center}");
             sb.append(".toast.show{transform:translateY(0);opacity:1}.toast-success{background:rgba(0,230,118,.2);color:#00e676}.toast-error{background:rgba(255,82,82,.2);color:#ff5252}.toast-info{background:rgba(108,99,255,.2);color:#6c63ff}");
             sb.append(".spinner{display:inline-block;width:18px;height:18px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}");
             sb.append("</style></head><body>");
-            sb.append("<h1>🎧 BT Audio</h1><p class=\"sub\">Connect &amp; play via Bluetooth</p>");
-            sb.append("<div class=\"section\"><button class=\"btn btn-primary\" id=\"scanBtn\" onclick=\"loadDevices()\">🔄 Refresh Devices</button></div>");
+            sb.append("<h1>BT Audio Controller</h1><p class=\"sub\">Find, pair & connect Bluetooth audio devices</p>");
+            sb.append("<div class=\"section\" style=\"display:flex;gap:10px\"><button class=\"btn btn-primary\" id=\"scanBtn\" onclick=\"scanDevices()\" style=\"flex:1\">Scan for Devices</button><button class=\"btn btn-primary\" id=\"refreshBtn\" onclick=\"loadDevices()\" style=\"flex:1\">Refresh List</button></div>");
             sb.append("<div id=\"deviceList\" class=\"device-list\"></div>");
             sb.append("<div id=\"toast\" class=\"toast\"></div>");
             sb.append("<script>");
-            sb.append("function toast(m,t='success'){var e=document.getElementById('toast');e.textContent=m;e.className='toast toast-'+t+' show';setTimeout(function(){e.classList.remove('show')},3000)}");
-            sb.append("function loadDevices(){var btn=document.getElementById('scanBtn');btn.innerHTML='<span class=spinner></span> Loading...';fetch('/api/devices').then(function(r){return r.json()}).then(function(d){renderDevices(d.devices||[]);btn.innerHTML='🔄 Refresh Devices'}).catch(function(e){toast('Error: '+e.message,'error')})}");
-            sb.append("function renderDevices(devs){var el=document.getElementById('deviceList');if(!devs.length){el.innerHTML='<div class=section><p style=text-align:center;color:#8888a0;padding:30px>No paired devices found.<br><br>Go to Android Settings → Bluetooth and pair your device first.</p></div>';return}");
-            sb.append("el.innerHTML=devs.map(function(d){var h='<div class=device-item><div class=device-icon>🎧</div><div class=device-info><div class=device-name>'+d.name+'</div><div class=device-mac>'+d.mac+'</div><div style=display:flex;flex-direction:row;gap:6px;margin-top:6px>'");
-            sb.append("if(d.connected){h+='<span class=badge badge-connected>● Connected</span>'}else{h+='<button class=btn btn-green btn-sm onclick=connect(\\''+d.mac+'\\')>Connect</button>'}");
-            sb.append("h+='<span class=badge badge-paired>Paired</span></div></div></div>';return h}).join('')}");
+            sb.append("function toast(m,t){t=t||'success';var e=document.getElementById('toast');e.textContent=m;e.className='toast toast-'+t+' show';setTimeout(function(){e.classList.remove('show')},4000)}");
+            sb.append("function scanDevices(){var btn=document.getElementById('scanBtn');btn.innerHTML='<span class=spinner></span> Scanning...';btn.disabled=true;fetch('/api/scan',{method:'POST'}).then(function(r){return r.json()}).then(function(d){toast(d.message,'info');setTimeout(function(){loadDevices();btn.innerHTML='Scan for Devices';btn.disabled=false},11000)})}");
+            sb.append("function loadDevices(){var btn=document.getElementById('refreshBtn');btn.innerHTML='<span class=spinner></span> Loading...';fetch('/api/devices').then(function(r){return r.json()}).then(function(d){renderDevices(d.devices||[]);btn.innerHTML='Refresh List'}).catch(function(e){toast('Error: '+e.message,'error');btn.innerHTML='Refresh List'})}");
+            sb.append("function renderDevices(devs){var el=document.getElementById('deviceList');if(!devs.length){el.innerHTML='<div class=section><p style=text-align:center;color:#8888a0;padding:30px>No devices found.<br><br>Tap <b>Scan for Devices</b> to find nearby Bluetooth devices.</p></div>';return}");
+            sb.append("el.innerHTML=devs.map(function(d){var h='<div class=device-item><div class=device-icon>");
+            sb.append("if(d.paired){h+='🎧'}else{h+='📡'}");
+            sb.append("h+='</div><div class=device-info><div class=device-name>'+d.name+'</div><div class=device-mac>'+d.mac+'</div><div style=display:flex;flex-direction:row;gap:6px;margin-top:6px>'");
+            sb.append("if(d.connected){h+='<span class=badge badge-connected>Connected</span>'}else if(d.paired){h+='<button class=btn btn-green btn-sm onclick=connect(\\''+d.mac+'\\')>Connect</button>'}");
+            sb.append("if(d.paired){h+='<span class=badge badge-paired>Paired</span>'}else{h+='<button class=btn btn-yellow btn-sm onclick=pair(\\''+d.mac+'\\')>Pair</button><span class=badge badge-found>Found</span>'}");
+            sb.append("if(d.paired&&!d.connected){h+='<button class=btn btn-red btn-sm onclick=disconnect(\\''+d.mac+'\\')>Disconnect</button>'}");
+            sb.append("h+='</div></div></div>';return h}).join('')}");
+            sb.append("function pair(mac){toast('Pairing with '+mac+'... Accept on the device.','info');fetch('/api/pair?mac='+mac,{method:'POST'}).then(function(r){return r.json()}).then(function(d){toast(d.message,d.ok?'success':'error');setTimeout(loadDevices,3000)})}");
             sb.append("function connect(mac){toast('Connecting...','info');fetch('/api/connect?mac='+mac,{method:'POST'}).then(function(r){return r.json()}).then(function(d){toast(d.message,d.ok?'success':'error');setTimeout(loadDevices,2000)})}");
+            sb.append("function disconnect(mac){toast('Disconnecting...','info');fetch('/api/disconnect?mac='+mac,{method:'POST'}).then(function(r){return r.json()}).then(function(d){toast(d.message,d.ok?'success':'error');setTimeout(loadDevices,2000)})}");
             sb.append("loadDevices();");
             sb.append("</script></body></html>");
             return sb.toString();
@@ -480,6 +615,9 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         if (httpServer != null) httpServer.stop();
+        try {
+            unregisterReceiver(discoveryReceiver);
+        } catch (Exception e) {}
         if (bluetoothAdapter != null && bluetoothA2dp != null) {
             bluetoothAdapter.closeProfileProxy(BluetoothProfile.A2DP, bluetoothA2dp);
         }
