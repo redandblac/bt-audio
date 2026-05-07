@@ -172,26 +172,35 @@ public class MainActivity extends Activity {
     }
     
     private void startHttpServer() {
-        executor.execute(() -> {
-            try {
-                httpServer = new HttpServer(5000);
-                httpServer.start();
-                mainHandler.post(() -> {
-                    String ip = getLocalIpAddress();
-                    statusText.setText(
-                        "BT Audio Controller Running\n\n" +
-                        "Open in browser:\n" +
-                        "http://" + ip + ":5000\n\n" +
-                        "Bluetooth: " + (bluetoothAdapter.isEnabled() ? "ON" : "OFF") + "\n" +
-                        "Devices paired: " + getPairedCount()
-                    );
-                });
-            } catch (Exception e) {
-                mainHandler.post(() -> {
-                    statusText.setText("Failed to start server: " + e.getMessage());
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    updateStatusAsync("Creating server...");
+                    httpServer = new HttpServer(5000);
+                    updateStatusAsync("Binding to port...");
+                    httpServer.start();
+                } catch (Exception e) {
+                    updateStatusAsync("Server failed: " + e.getClass().getSimpleName() + " - " + e.getMessage());
+                    e.printStackTrace();
+                    return;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {}
+                final String ip = getLocalIpAddress();
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        statusText.append("\n\n========================================\n");
+                        statusText.append("SERVER RUNNING!\n");
+                        statusText.append("Open: http://" + ip + ":5000\n");
+                        statusText.append("Bluetooth: " + (bluetoothAdapter.isEnabled() ? "ON" : "OFF") + "\n");
+                        statusText.append("Devices paired: " + getPairedCount() + "\n");
+                    }
                 });
             }
-        });
+        }).start();
     }
     
     private String getLocalIpAddress() {
